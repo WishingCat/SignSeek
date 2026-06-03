@@ -313,8 +313,8 @@ def rerank_visual(frame_paths, candidates: list[dict], top_final: int = 5,
                     scored[rid] = {"id": rid, "confidence": conf, "reason": str(r.get("reason", ""))}
         except Exception as e:
             print(f"  [rerank_visual 批次降级：{e}]")
-    if not scored:  # 全失败 → 退回前 top_final 候选
-        return [{"id": c["id"], "confidence": 0.0, "reason": "（视觉重排失败，按召回顺序）"}
+    if not scored:  # 全失败 → 退回前 top_final 候选；confidence 不可用，避免误显示为 0%
+        return [{"id": c["id"], "confidence": None, "reason": "（视觉重排暂不可用，按文本召回顺序展示）"}
                 for c in candidates[:top_final]]
     ranked = sorted(scored.values(), key=lambda d: d["confidence"], reverse=True)
     return ranked[:top_final]

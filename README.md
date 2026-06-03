@@ -36,6 +36,7 @@ python3 build_index.py                           # ② 建索引（首次下 BGE
 python3 query.py "../测试题/测试题 1.jpg" --open    # ③ 查询（单帧）
 python3 query.py f1.jpg f2.jpg f3.jpg --open      #    多关键帧
 python3 query.py img.jpg --no-visual-rerank       #    省 token 调试档
+python3 web_app.py --open                         #    本地网页前端（上传多帧，展示 top-9）
 ```
 
 常用参数：`--top-k`（默认 5）、`--top-recall`（默认 40）、`--no-visual-rerank`、`--max-rerank-images`、`--json-only`、`--open`、`--backend local|api`。
@@ -50,6 +51,7 @@ python3 query.py img.jpg --no-visual-rerank       #    省 token 调试档
 | `build_index.py` | signs.db →(只读)→ `index/`（embeddings.npy + meta.json） |
 | `query.py` | 在线主流程 ＋ HTML 报告 |
 | `smoke_test.py` | 网关连通与格式探测 |
+| `web_app.py` | 本地网页前端与上传 API，复用 `query.run_query()` |
 
 ## 网关降级矩阵（`llm.chat` 自动处理，首次探测后记忆）
 
