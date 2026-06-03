@@ -1485,9 +1485,8 @@ INDEX_HTML = r"""<!doctype html>
 
     <section class="hero-card">
       <div>
-        <div class="hero-kicker">关键帧手语反查</div>
         <h2 class="hero-title">上传手语图片，检索其真意</h2>
-        <p class="hero-copy">选择 1-5 张动作关键帧，系统会理解手型、朝向和动作线索，并从国家通用手语词典中返回最相近的 9 个结果。</p>
+        <p class="hero-copy">生命是一场旅程，我们等了多少个轮回，才有机会去享受这一次旅程。</p>
       </div>
       <div class="hero-visual" aria-hidden="true">手</div>
     </section>
