@@ -1,0 +1,8 @@
+# 手语视觉反查 MVP 依赖
+# 本机（Python 3.13 / arm64）通常已装 numpy / torch / openai / python-dotenv / Pillow，
+# 主要需补 sentence-transformers（会按需拉 torch）。
+openai>=1.40
+sentence-transformers>=2.7
+numpy>=1.26
+Pillow>=10
+python-dotenv>=1.0
