@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import json
 import mimetypes
 import tempfile
@@ -19,6 +20,7 @@ import traceback
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -238,6 +240,7 @@ INDEX_HTML = r"""<!doctype html>
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-wrap: wrap;
       gap: 16px;
       min-height: 64px;
       padding: 18px 20px;
@@ -658,6 +661,36 @@ INDEX_HTML = r"""<!doctype html>
 
     .result-wrap {
       display: none;
+    }
+
+    .result-tools {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .export-button {
+      min-height: 38px;
+      border-radius: 999px;
+      padding: 0 15px;
+      color: #fff;
+      background: linear-gradient(135deg, #1f6f48, #2f8b57);
+      box-shadow: 0 10px 22px rgba(47, 139, 87, .20);
+      font-size: 13px;
+      font-weight: 720;
+      transition: transform .18s var(--ease), box-shadow .18s var(--ease), filter .18s var(--ease);
+    }
+
+    .export-button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 14px 28px rgba(47, 139, 87, .24);
+      filter: saturate(1.08);
+    }
+
+    .export-button:active:not(:disabled) {
+      transform: scale(.96);
     }
 
     .summary {
@@ -1385,6 +1418,16 @@ INDEX_HTML = r"""<!doctype html>
         width: 100%;
       }
 
+      .result-tools {
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      .result-tools .status-pill {
+        width: auto;
+        min-width: 104px;
+      }
+
       .panel-head,
       .panel-body,
       .summary,
@@ -1530,7 +1573,10 @@ INDEX_HTML = r"""<!doctype html>
         <div class="result-wrap" id="resultWrap">
           <div class="panel-head">
             <h2 class="panel-title">匹配结果</h2>
-            <div class="status-pill" id="elapsed">--</div>
+            <div class="result-tools">
+              <button class="export-button" id="exportButton" type="button" disabled>导出图片</button>
+              <div class="status-pill" id="elapsed">--</div>
+            </div>
           </div>
           <div class="summary">
             <div class="query-text" id="queryText"></div>
@@ -1545,7 +1591,7 @@ INDEX_HTML = r"""<!doctype html>
       </section>
     </section>
     <div class="credit-row">
-      <div class="developer-credit">开发者：手语分社心创组 涂增基</div>
+      <div class="developer-credit">开发者：手语分社心创组</div>
     </div>
   </main>
 
@@ -1554,7 +1600,11 @@ INDEX_HTML = r"""<!doctype html>
       frameCount: 1,
       files: new Map(),
       busy: false,
+      exporting: false,
       health: null,
+      lastResult: null,
+      lastFrames: [],
+      lastQueryAt: null,
     };
 
     const frameButtons = document.getElementById("frameButtons");
@@ -1572,6 +1622,7 @@ INDEX_HTML = r"""<!doctype html>
     const cards = document.getElementById("cards");
     const elapsed = document.getElementById("elapsed");
     const modelInfo = document.getElementById("modelInfo");
+    const exportButton = document.getElementById("exportButton");
 
     function escapeHtml(value) {
       return String(value ?? "")
@@ -1604,6 +1655,7 @@ INDEX_HTML = r"""<!doctype html>
       document.querySelectorAll("input[type=file], #frameButtons button").forEach(el => {
         el.disabled = next;
       });
+      updateExportButton();
     }
 
     function canRun() {
@@ -1614,10 +1666,37 @@ INDEX_HTML = r"""<!doctype html>
       return true;
     }
 
+    function canExport() {
+      return !state.busy
+        && !state.exporting
+        && state.lastResult
+        && Array.isArray(state.lastResult.results)
+        && state.lastResult.results.length > 0;
+    }
+
+    function updateExportButton() {
+      exportButton.disabled = !canExport();
+      exportButton.textContent = state.exporting ? "正在导出" : "导出图片";
+    }
+
     function updateControls() {
       const count = Array.from(state.files.keys()).filter(i => i < state.frameCount).length;
       filledCount.textContent = `${count} / ${state.frameCount}`;
       runButton.disabled = !canRun();
+      updateExportButton();
+    }
+
+    function clearResults() {
+      state.lastResult = null;
+      state.lastFrames = [];
+      state.lastQueryAt = null;
+      emptyState.style.display = "grid";
+      resultWrap.style.display = "none";
+      queryText.textContent = "";
+      descChips.innerHTML = "";
+      cards.innerHTML = "";
+      elapsed.textContent = "--";
+      updateExportButton();
     }
 
     function renderFrameButtons() {
@@ -1632,6 +1711,7 @@ INDEX_HTML = r"""<!doctype html>
           for (const key of Array.from(state.files.keys())) {
             if (key >= i) state.files.delete(key);
           }
+          clearResults();
           renderAll();
         });
         frameButtons.appendChild(button);
@@ -1667,6 +1747,7 @@ INDEX_HTML = r"""<!doctype html>
             slot.classList.remove("dragging");
             const prepared = await prepareImage(file);
             state.files.set(i, prepared);
+            clearResults();
             pulseElement(slot);
             renderAll();
           } catch (err) {
@@ -1699,6 +1780,7 @@ INDEX_HTML = r"""<!doctype html>
         });
         clearButton.addEventListener("click", () => {
           state.files.delete(i);
+          clearResults();
           pulseElement(slot);
           renderAll();
         });
@@ -1781,6 +1863,10 @@ INDEX_HTML = r"""<!doctype html>
       pulseElement(runButton);
       setBusy(true);
       setMessage("正在提交关键帧");
+      state.lastResult = null;
+      state.lastFrames = [];
+      state.lastQueryAt = null;
+      updateExportButton();
       emptyState.style.display = "none";
       resultWrap.style.display = "block";
       queryText.textContent = "";
@@ -1789,9 +1875,11 @@ INDEX_HTML = r"""<!doctype html>
       elapsed.textContent = "处理中";
 
       const frames = [];
+      const reportFrames = [];
       for (let i = 0; i < state.frameCount; i += 1) {
         const item = state.files.get(i);
         frames.push({ name: item.name, mime: item.mime, data: item.data });
+        reportFrames.push({ name: item.name, data: item.preview || item.data });
       }
 
       try {
@@ -1803,13 +1891,24 @@ INDEX_HTML = r"""<!doctype html>
         });
         const data = await res.json();
         if (!res.ok) {
-          throw new Error(data.error || "反查失败");
+          const errorText = data.error || "反查失败";
+          throw new Error(data.log_dir ? `${errorText}（日志：${data.log_dir}）` : errorText);
         }
+        state.lastResult = data;
+        state.lastFrames = reportFrames;
+        state.lastQueryAt = new Date();
         renderResult(data);
+        updateExportButton();
         resultPanel.scrollIntoView({ behavior: "smooth", block: "start" });
-        setMessage("完成");
+        setMessage(data.log_dir ? `完成，日志已保存：${data.log_dir}` : "完成");
       } catch (err) {
         elapsed.textContent = "--";
+        state.lastResult = null;
+        state.lastFrames = [];
+        state.lastQueryAt = null;
+        emptyState.style.display = "grid";
+        resultWrap.style.display = "none";
+        updateExportButton();
         setMessage(err.message || String(err), true);
       } finally {
         setBusy(false);
@@ -1827,6 +1926,404 @@ INDEX_HTML = r"""<!doctype html>
         iconicity: "象形",
         resembles: "字形",
       }[key] || key;
+    }
+
+    function formatConfidence(value) {
+      return typeof value === "number" ? `${Math.round(value * 100)}%` : "--";
+    }
+
+    function formatSimilarity(value) {
+      return typeof value === "number" ? value.toFixed(3) : "--";
+    }
+
+    function formatRecall(item) {
+      return item && item.recall_rank === 0 ? "词法注入" : `召回#${item && item.recall_rank ? item.recall_rank : "--"}`;
+    }
+
+    function formatMotion(item) {
+      if (!item || !item.estimated_frames) return "";
+      const level = {
+        unknown: "动作未知",
+        static: "静态",
+        simple_motion: "简单动作",
+        path_motion: "路径动作",
+        multi_step: "多步动作",
+      }[item.motion_level] || item.motion_level || "动作";
+      return `预计${item.estimated_frames}帧 · ${level}`;
+    }
+
+    function formatFrameScore(value) {
+      return typeof value === "number" ? `帧数权重 ${value >= 0 ? "+" : ""}${value.toFixed(3)}` : "";
+    }
+
+    function formatMotionScore(value) {
+      return typeof value === "number" ? `动作权重 ${value >= 0 ? "+" : ""}${value.toFixed(3)}` : "";
+    }
+
+    function normalizeText(value) {
+      return String(value ?? "").replace(/\s+/g, " ").trim();
+    }
+
+    function truncateText(value, maxChars) {
+      const chars = Array.from(normalizeText(value));
+      if (chars.length <= maxChars) return chars.join("");
+      return `${chars.slice(0, Math.max(0, maxChars - 1)).join("")}…`;
+    }
+
+    function padNumber(value) {
+      return String(value).padStart(2, "0");
+    }
+
+    function formatReportTime(date) {
+      return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())} ${padNumber(date.getHours())}:${padNumber(date.getMinutes())}`;
+    }
+
+    function reportFilename(date) {
+      return `signseek-report-${date.getFullYear()}${padNumber(date.getMonth() + 1)}${padNumber(date.getDate())}-${padNumber(date.getHours())}${padNumber(date.getMinutes())}${padNumber(date.getSeconds())}.png`;
+    }
+
+    function roundedPath(ctx, x, y, width, height, radius) {
+      const r = Math.min(radius, width / 2, height / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + width - r, y);
+      ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+      ctx.lineTo(x + width, y + height - r);
+      ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+      ctx.lineTo(x + r, y + height);
+      ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.closePath();
+    }
+
+    function fillRoundRect(ctx, x, y, width, height, radius, fillStyle, strokeStyle = "") {
+      roundedPath(ctx, x, y, width, height, radius);
+      ctx.fillStyle = fillStyle;
+      ctx.fill();
+      if (strokeStyle) {
+        ctx.strokeStyle = strokeStyle;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+
+    function wrapCanvasText(ctx, text, maxWidth, maxLines = 0) {
+      const chars = Array.from(normalizeText(text));
+      if (!chars.length) return [];
+      const lines = [];
+      let line = "";
+      let truncated = false;
+
+      for (let index = 0; index < chars.length; index += 1) {
+        const char = chars[index];
+        const testLine = line + char;
+        if (line && ctx.measureText(testLine).width > maxWidth) {
+          lines.push(line);
+          line = char.trimStart();
+          if (maxLines && lines.length >= maxLines) {
+            truncated = true;
+            break;
+          }
+        } else {
+          line = testLine;
+        }
+      }
+
+      if (!truncated && line && (!maxLines || lines.length < maxLines)) {
+        lines.push(line);
+      }
+      if (maxLines && lines.length > maxLines) {
+        lines.length = maxLines;
+        truncated = true;
+      }
+      if (truncated && lines.length) {
+        let last = lines[lines.length - 1];
+        while (last.length && ctx.measureText(`${last}…`).width > maxWidth) {
+          last = Array.from(last).slice(0, -1).join("");
+        }
+        lines[lines.length - 1] = `${last}…`;
+      }
+      return lines;
+    }
+
+    function drawWrappedText(ctx, text, x, y, maxWidth, lineHeight, maxLines = 0) {
+      const lines = wrapCanvasText(ctx, text, maxWidth, maxLines);
+      lines.forEach((line, index) => {
+        ctx.fillText(line, x, y + index * lineHeight);
+      });
+      return y + Math.max(lines.length, 1) * lineHeight;
+    }
+
+    function drawImageContain(ctx, img, x, y, width, height, radius, label = "") {
+      ctx.save();
+      fillRoundRect(ctx, x, y, width, height, radius, "#fffdf7", "rgba(47, 139, 87, 0.18)");
+      roundedPath(ctx, x, y, width, height, radius);
+      ctx.clip();
+      if (img) {
+        const iw = img.naturalWidth || img.width;
+        const ih = img.naturalHeight || img.height;
+        const scale = Math.min(width / iw, height / ih);
+        const dw = iw * scale;
+        const dh = ih * scale;
+        ctx.drawImage(img, x + (width - dw) / 2, y + (height - dh) / 2, dw, dh);
+      } else {
+        ctx.fillStyle = "#dff2df";
+        ctx.fillRect(x, y, width, height);
+        ctx.fillStyle = "#2f8b57";
+        ctx.font = "700 30px -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label || "图", x + width / 2, y + height / 2);
+        ctx.textAlign = "left";
+        ctx.textBaseline = "alphabetic";
+      }
+      ctx.restore();
+    }
+
+    function drawPill(ctx, text, x, y, fillStyle = "#dff2df", textStyle = "#1f6f48") {
+      ctx.font = "700 24px -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif";
+      const width = Math.ceil(ctx.measureText(text).width) + 34;
+      fillRoundRect(ctx, x, y, width, 44, 22, fillStyle, "rgba(47, 139, 87, 0.12)");
+      ctx.fillStyle = textStyle;
+      ctx.fillText(text, x + 17, y + 30);
+      return width;
+    }
+
+    function drawPills(ctx, items, x, y, maxWidth) {
+      let px = x;
+      let py = y;
+      items.forEach((item) => {
+        const label = truncateText(item, 28);
+        ctx.font = "700 24px -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif";
+        const width = Math.ceil(ctx.measureText(label).width) + 34;
+        if (px !== x && px + width > x + maxWidth) {
+          px = x;
+          py += 54;
+        }
+        drawPill(ctx, label, px, py);
+        px += width + 12;
+      });
+      return py + 44;
+    }
+
+    async function loadImageOrNull(src) {
+      if (!src) return null;
+      try {
+        return await loadImage(src);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function reportDescriptionItems(data) {
+      const desc = data.description || {};
+      return ["hands", "handshape", "orientation", "location", "movement", "resembles"]
+        .map((key) => {
+          const value = desc[key];
+          if (!value || String(value).toLowerCase() === "uncertain") return "";
+          return `${labelForKey(key)}：${value}`;
+        })
+        .filter(Boolean);
+    }
+
+    async function exportReportImage() {
+      if (!canExport()) {
+        setMessage("请先完成一次反查，再导出图片", true);
+        return;
+      }
+
+      state.exporting = true;
+      updateExportButton();
+      setMessage("正在生成导出图片");
+
+      try {
+        const data = state.lastResult;
+        const frames = state.lastFrames || [];
+        const results = (data.results || []).slice(0, 9);
+        const frameImages = await Promise.all(frames.map((frame) => loadImageOrNull(frame.data)));
+        const resultImages = await Promise.all(results.map((item) => loadImageOrNull(item.image_data)));
+        const reportTime = state.lastQueryAt || new Date();
+        const width = 1440;
+        const margin = 64;
+        const inner = width - margin * 2;
+        const gap = 24;
+        const frameGap = 18;
+        const frameCount = Math.max(frames.length, 1);
+        const frameWidth = Math.min(210, Math.floor((inner - frameGap * (frameCount - 1)) / frameCount));
+        const frameHeight = frameWidth;
+        const frameSectionHeight = 104 + frameHeight + 56;
+        const querySectionHeight = 330;
+        const topSectionHeight = results[0] ? 360 : 0;
+        const rest = results.slice(1);
+        const resultCols = 3;
+        const resultCardHeight = 228;
+        const resultRows = Math.max(1, Math.ceil(rest.length / resultCols));
+        const resultGridHeight = rest.length ? resultRows * resultCardHeight + (resultRows - 1) * 18 : 0;
+        const resultTitleHeight = rest.length ? 56 : 0;
+        const height = margin + 150 + gap + 64 + gap + frameSectionHeight + gap
+          + querySectionHeight + gap + topSectionHeight + gap + resultTitleHeight + resultGridHeight + 108;
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        const fontStack = "-apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif";
+
+        const bg = ctx.createLinearGradient(0, 0, width, height);
+        bg.addColorStop(0, "#fffaf0");
+        bg.addColorStop(.48, "#fff0d9");
+        bg.addColorStop(1, "#fff8ed");
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, width, height);
+        ctx.fillStyle = "rgba(255, 217, 198, 0.70)";
+        ctx.beginPath();
+        ctx.arc(180, 140, 220, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "rgba(223, 242, 223, 0.82)";
+        ctx.beginPath();
+        ctx.arc(width - 130, 105, 230, 0, Math.PI * 2);
+        ctx.fill();
+
+        let y = margin;
+        const brandGradient = ctx.createLinearGradient(margin, y, margin + 620, y + 80);
+        brandGradient.addColorStop(0, "#1f6f48");
+        brandGradient.addColorStop(.55, "#2f8b57");
+        brandGradient.addColorStop(1, "#f4b545");
+        fillRoundRect(ctx, margin, y, 78, 78, 24, "#2f8b57");
+        ctx.fillStyle = "#fff";
+        ctx.font = `800 42px ${fontStack}`;
+        ctx.fillText("S", margin + 26, y + 53);
+        ctx.fillStyle = brandGradient;
+        ctx.font = `800 62px ${fontStack}`;
+        ctx.fillText("见手知意 SignSeek", margin + 100, y + 58);
+        ctx.fillStyle = "#6f8178";
+        ctx.font = `500 26px ${fontStack}`;
+        ctx.fillText("见手知意查询报告 · Top-9 匹配结果", margin + 102, y + 104);
+        y += 150;
+
+        const meta = [
+          `查询时间 ${formatReportTime(reportTime)}`,
+          `关键帧 ${frames.length} 张`,
+          `耗时 ${data.elapsed ? `${data.elapsed.toFixed(1)}s` : "--"}`,
+          `Top9 结果 ${results.length} 条`,
+        ];
+        const indexCount = state.health && state.health.index_meta && state.health.index_meta.count;
+        if (indexCount) meta.push(`词典 ${indexCount} 条`);
+        drawPills(ctx, meta, margin, y, inner);
+        y += 64 + gap;
+
+        fillRoundRect(ctx, margin, y, inner, frameSectionHeight, 34, "rgba(255, 253, 247, 0.92)", "rgba(47, 139, 87, 0.14)");
+        ctx.fillStyle = "#263931";
+        ctx.font = `800 32px ${fontStack}`;
+        ctx.fillText("上传关键帧", margin + 32, y + 52);
+        ctx.fillStyle = "#6f8178";
+        ctx.font = `500 22px ${fontStack}`;
+        ctx.fillText("本次查询提交的动作图片", margin + 32, y + 86);
+        let frameX = margin + 32;
+        frames.forEach((frame, index) => {
+          const imageY = y + 104;
+          drawImageContain(ctx, frameImages[index], frameX, imageY, frameWidth, frameHeight, 26, String(index + 1));
+          ctx.fillStyle = "#263931";
+          ctx.font = `800 24px ${fontStack}`;
+          ctx.fillText(`第 ${index + 1} 帧`, frameX, imageY + frameHeight + 34);
+          ctx.fillStyle = "#6f8178";
+          ctx.font = `500 18px ${fontStack}`;
+          ctx.fillText(truncateText(frame.name || "frame", 18), frameX, imageY + frameHeight + 58);
+          frameX += frameWidth + frameGap;
+        });
+        y += frameSectionHeight + gap;
+
+        fillRoundRect(ctx, margin, y, inner, querySectionHeight, 34, "rgba(255, 247, 235, 0.94)", "rgba(47, 139, 87, 0.12)");
+        ctx.fillStyle = "#263931";
+        ctx.font = `800 32px ${fontStack}`;
+        ctx.fillText("此次查询关键信息", margin + 32, y + 52);
+        ctx.fillStyle = "#6f8178";
+        ctx.font = `500 23px ${fontStack}`;
+        const queryTextBottom = drawWrappedText(ctx, data.query_text || "未返回识别文本", margin + 32, y + 92, inner - 64, 34, 4);
+        const descItems = reportDescriptionItems(data);
+        if (descItems.length) {
+          drawPills(ctx, descItems, margin + 32, queryTextBottom + 18, inner - 64);
+        }
+        y += querySectionHeight + gap;
+
+        if (results[0]) {
+          const top = results[0];
+          fillRoundRect(ctx, margin, y, inner, topSectionHeight, 38, "rgba(223, 242, 223, 0.92)", "rgba(47, 139, 87, 0.22)");
+          drawPill(ctx, "最匹配 #1", margin + 32, y + 32, "#2f8b57", "#fff");
+          drawImageContain(ctx, resultImages[0], margin + 32, y + 94, 220, 220, 28, "1");
+          const textX = margin + 284;
+          const textW = inner - 330;
+          ctx.fillStyle = "#263931";
+          ctx.font = `800 48px ${fontStack}`;
+          drawWrappedText(ctx, top.words || "--", textX, y + 86, textW, 58, 2);
+          ctx.fillStyle = "#1f6f48";
+          ctx.font = `800 28px ${fontStack}`;
+          drawWrappedText(ctx, `匹配度 ${formatConfidence(top.confidence)} · 相似度 ${formatSimilarity(top.recall_sim)} · ${formatRecall(top)} · ${formatMotion(top)}`, textX, y + 184, textW, 34, 2);
+          ctx.fillStyle = "#be123c";
+          ctx.font = `600 24px ${fontStack}`;
+          drawWrappedText(ctx, top.reason || "暂无匹配理由", textX, y + 226, textW, 34, 2);
+          ctx.fillStyle = "#6f8178";
+          ctx.font = `500 22px ${fontStack}`;
+          drawWrappedText(ctx, top.description || "", textX, y + 296, textW, 30, 2);
+          y += topSectionHeight + gap;
+        }
+
+        if (rest.length) {
+          ctx.fillStyle = "#263931";
+          ctx.font = `800 32px ${fontStack}`;
+          ctx.fillText("Top9 匹配排行", margin, y + 34);
+          y += 56;
+          const cardGap = 18;
+          const cardWidth = Math.floor((inner - cardGap * (resultCols - 1)) / resultCols);
+          rest.forEach((item, index) => {
+            const col = index % resultCols;
+            const row = Math.floor(index / resultCols);
+            const x = margin + col * (cardWidth + cardGap);
+            const cy = y + row * (resultCardHeight + cardGap);
+            fillRoundRect(ctx, x, cy, cardWidth, resultCardHeight, 28, "rgba(255, 253, 247, 0.94)", "rgba(47, 139, 87, 0.12)");
+            drawImageContain(ctx, resultImages[index + 1], x + 22, cy + 58, 116, 116, 22, String(index + 2));
+            ctx.fillStyle = "#2f8b57";
+            ctx.font = `800 24px ${fontStack}`;
+            ctx.fillText(`#${index + 2}`, x + 22, cy + 38);
+            const tx = x + 154;
+            const tw = cardWidth - 176;
+            ctx.fillStyle = "#263931";
+            ctx.font = `800 28px ${fontStack}`;
+            drawWrappedText(ctx, item.words || "--", tx, cy + 42, tw, 34, 2);
+            ctx.fillStyle = "#1f6f48";
+            ctx.font = `800 20px ${fontStack}`;
+            ctx.fillText(`匹配度 ${formatConfidence(item.confidence)}`, tx, cy + 116);
+            ctx.fillStyle = "#6f8178";
+            ctx.font = `500 18px ${fontStack}`;
+            ctx.fillText(`id=${truncateText(item.id || "--", 16)}`, tx, cy + 148);
+            ctx.fillText(`相似度 ${formatSimilarity(item.recall_sim)} · ${truncateText(formatMotion(item), 14)}`, tx, cy + 176);
+            ctx.fillStyle = "#be123c";
+            ctx.font = `500 18px ${fontStack}`;
+            drawWrappedText(ctx, item.reason || "", x + 22, cy + 204, cardWidth - 44, 24, 1);
+          });
+          y += resultGridHeight;
+        }
+
+        ctx.fillStyle = "#6f8178";
+        ctx.font = `500 22px ${fontStack}`;
+        ctx.fillText("由见手知意 SignSeek 本地生成", margin, height - 58);
+        ctx.textAlign = "right";
+        ctx.fillText("开发者：手语分社心创组", width - margin, height - 58);
+        ctx.textAlign = "left";
+
+        const link = document.createElement("a");
+        link.download = reportFilename(reportTime);
+        link.href = canvas.toDataURL("image/png");
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setMessage("导出图片完成");
+      } catch (err) {
+        setMessage(err.message || "导出图片失败", true);
+      } finally {
+        state.exporting = false;
+        updateExportButton();
+      }
     }
 
     function renderResult(data) {
@@ -1847,9 +2344,21 @@ INDEX_HTML = r"""<!doctype html>
 
       cards.innerHTML = "";
       (data.results || []).forEach((item, index) => {
-        const confidence = typeof item.confidence === "number" ? `${Math.round(item.confidence * 100)}%` : "--";
-        const recall = item.recall_rank === 0 ? "词法注入" : `召回#${item.recall_rank}`;
-        const sim = typeof item.recall_sim === "number" ? item.recall_sim.toFixed(3) : "--";
+        const confidence = formatConfidence(item.confidence);
+        const recall = formatRecall(item);
+        const sim = formatSimilarity(item.recall_sim);
+        const motion = formatMotion(item);
+        const frameScore = formatFrameScore(item.frame_score);
+        const finalScore = formatSimilarity(item.final_recall_score);
+        const metaBits = [
+          `id=${item.id}`,
+          recall,
+          motion,
+          `相似度 ${sim}`,
+          frameScore,
+          formatMotionScore(item.motion_score),
+          item.final_recall_score ? `综合分 ${finalScore}` : "",
+        ].filter(Boolean);
         const card = document.createElement("article");
         card.className = index === 0 ? "candidate top-match" : "candidate";
         card.style.animationDelay = `${index * 54}ms`;
@@ -1860,11 +2369,11 @@ INDEX_HTML = r"""<!doctype html>
           <div class="candidate-main">
             <div class="rank-line">
               <div class="rank">#${index + 1}</div>
-              ${index === 0 ? `<div class="best-badge">最匹配</div>` : ""}
+            ${index === 0 ? `<div class="best-badge">最匹配</div>` : ""}
               <div class="confidence">${confidence}</div>
             </div>
             <div class="words">${escapeHtml(item.words)}</div>
-            <div class="meta">id=${escapeHtml(item.id)} · ${escapeHtml(recall)} · 相似度 ${escapeHtml(sim)}</div>
+            <div class="meta">${escapeHtml(metaBits.join(" · "))}</div>
             <div class="reason">${escapeHtml(item.reason || "")}</div>
             <details>
               <summary>打法描述</summary>
@@ -1884,13 +2393,13 @@ INDEX_HTML = r"""<!doctype html>
     resetButton.addEventListener("click", () => {
       pulseElement(resetButton);
       state.files.clear();
-      emptyState.style.display = "grid";
-      resultWrap.style.display = "none";
+      clearResults();
       setMessage("");
       renderAll();
     });
 
     runButton.addEventListener("click", runQuery);
+    exportButton.addEventListener("click", exportReportImage);
 
     document.addEventListener("pointerdown", (event) => {
       const target = event.target.closest("button, .file-button, summary");
@@ -1936,9 +2445,16 @@ def _decode_data_url(data_url: str) -> tuple[str, bytes]:
     mime = "application/octet-stream"
     if header.startswith("data:") and ";base64" in header:
         mime = header[5:header.index(";base64")] or mime
-    raw = base64.b64decode(encoded, validate=True)
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("图片数据不是有效的 base64") from exc
     if not raw:
         raise ValueError("图片数据为空")
+    try:
+        Image.open(BytesIO(raw)).verify()
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("上传内容不是有效图片") from exc
     return mime, raw
 
 
@@ -1956,7 +2472,6 @@ def _image_data_uri(path: Path, max_px: int = 520) -> str:
     img = Image.open(path).convert("RGB")
     if max(img.size) > max_px:
         img.thumbnail((max_px, max_px))
-    from io import BytesIO
 
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=84)
@@ -1987,15 +2502,32 @@ def _run_query_api(payload: dict) -> dict:
     with tempfile.TemporaryDirectory(prefix="signseek_web_") as tmp:
         tmpdir = Path(tmp)
         frame_paths: list[Path] = []
+        uploaded_frames = []
         for index, frame in enumerate(frames, start=1):
             if not isinstance(frame, dict):
                 raise ValueError("关键帧格式不正确")
             name = str(frame.get("name") or f"frame_{index}.jpg")
+            declared_mime = str(frame.get("mime") or "")
             mime, raw = _decode_data_url(str(frame.get("data") or ""))
             suffix = _safe_suffix(name, mime)
             path = tmpdir / f"frame_{index:02d}{suffix}"
             path.write_bytes(raw)
             frame_paths.append(path)
+            frame_info = {
+                "index": index,
+                "name": name,
+                "declared_mime": declared_mime,
+                "decoded_mime": mime,
+                "bytes": len(raw),
+                "temp_path": str(path),
+            }
+            try:
+                with Image.open(BytesIO(raw)) as img:
+                    frame_info["width"], frame_info["height"] = img.size
+                    frame_info["format"] = img.format
+            except Exception as exc:  # noqa: BLE001
+                frame_info["image_error"] = str(exc)
+            uploaded_frames.append(frame_info)
 
         result = query.run_query(
             frame_paths,
@@ -2003,7 +2535,13 @@ def _run_query_api(payload: dict) -> dict:
             top_text=max(16, top_k),
             top_final=top_k,
             visual=True,
-            max_rerank_images=10,
+            max_rerank_images=5,
+            log_source="web",
+            log_meta={
+                "endpoint": "/api/query",
+                "top_k": top_k,
+                "uploaded_frames": uploaded_frames,
+            },
         )
 
     response_results = []
@@ -2024,13 +2562,23 @@ def _run_query_api(payload: dict) -> dict:
             "reason": item.get("reason", ""),
             "recall_rank": item.get("recall_rank"),
             "recall_sim": item.get("recall_sim"),
+            "frame_score": item.get("frame_score"),
+            "motion_score": item.get("motion_score"),
+            "final_recall_score": item.get("final_recall_score"),
+            "estimated_frames": item.get("estimated_frames"),
+            "motion_level": item.get("motion_level"),
+            "motion_tags": item.get("motion_tags", []),
+            "motion_confidence": item.get("motion_confidence"),
         })
 
     return {
         "elapsed": time.time() - started,
         "description": result.get("description", {}),
         "query_text": result.get("query_text", ""),
+        "query_motion": result.get("query_motion", {}),
         "results": response_results,
+        "log_id": result.get("log_id"),
+        "log_dir": result.get("log_dir"),
     }
 
 
@@ -2083,6 +2631,8 @@ class SignSeekHandler(BaseHTTPRequestHandler):
             traceback.print_exc()
             _json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {
                 "error": str(exc),
+                "log_id": getattr(exc, "log_id", None),
+                "log_dir": getattr(exc, "log_dir", None),
             })
 
 

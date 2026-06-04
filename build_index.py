@@ -13,15 +13,16 @@ import numpy as np
 
 import config
 from embedder import get_embedder
+from motion_metadata import derive_motion_metadata
 
 
 def load_signs(db_path, limit: int | None = None, v2: bool = False) -> list[dict]:
     """读取 6699 个 sign，聚合同义词。返回按 id 升序的 dict 列表。
 
-    v2=True 时额外读取 llm_description，并令 embed_text = 原文 + LLM重描述（叠加策略）。
+    v2=True 时额外读取 llm_description / llm_struct，并令 embed_text = 原文 + LLM重描述（叠加策略）。
     """
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)  # 只读打开，杜绝误写
-    llm_col = ", s.llm_description" if v2 else ", NULL"
+    llm_col = ", s.llm_description, s.llm_struct" if v2 else ", NULL, NULL"
     try:
         sql = f"""
             SELECT s.id,
@@ -40,10 +41,11 @@ def load_signs(db_path, limit: int | None = None, v2: bool = False) -> list[dict
         con.close()
     out = []
     for r in rows:
-        desc, llm_desc = r[2] or "", (r[4] or "")
+        desc, llm_desc, llm_struct = r[2] or "", (r[4] or ""), (r[5] or "")
         embed_text = f"{desc}。{llm_desc}" if (v2 and llm_desc) else desc
+        motion = derive_motion_metadata(desc, llm_struct, llm_desc)
         out.append({"id": r[0], "words": r[1] or "", "description": desc,
-                    "image_path": r[3], "embed_text": embed_text})
+                    "image_path": r[3], "embed_text": embed_text, **motion})
     return out
 
 
@@ -83,6 +85,9 @@ def main() -> int:
         "embed_field": "description+llm_description" if args.v2 else "description",
         "source": "v2" if args.v2 else "v1",
         "normalized": True,
+        "motion_metadata": True,
+        "motion_metadata_source": "description+llm_description+llm_struct" if args.v2 else "description",
+        "max_query_frames": 5,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"已写入 {config.INDEX_DIR}")

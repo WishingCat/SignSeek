@@ -220,14 +220,30 @@ def chat_with_usage(messages, *, max_tokens: int = 1024, json_mode: bool = False
 
 
 # --- 三段式高层调用 -----------------------------------------------------
-def describe_frames(frame_paths) -> dict:
+def describe_frames(frame_paths, logger=None) -> dict:
     """阶段1：关键帧 → 结构化描述 dict。"""
     content = [build_text_content(config.DESCRIBE_PROMPT)]
     for p in frame_paths:
         content.append(build_image_content(p, detail="auto"))
-    raw = chat([{"role": "user", "content": content}],
-               max_tokens=900, json_mode=True, json_schema=config.QUERY_JSON_SCHEMA, effort="low")
-    return extract_json(raw)
+    if logger:
+        logger.event("llm.describe_frames.request", {
+            "frame_paths": [str(p) for p in frame_paths],
+            "prompt": config.DESCRIBE_PROMPT,
+            "json_schema": config.QUERY_JSON_SCHEMA.get("name"),
+        })
+    raw, usage = chat_with_usage(
+        [{"role": "user", "content": content}],
+        max_tokens=900,
+        json_mode=True,
+        json_schema=config.QUERY_JSON_SCHEMA,
+        effort="low",
+    )
+    if logger:
+        logger.event("llm.describe_frames.response", {"raw": raw, "usage": usage})
+    parsed = extract_json(raw)
+    if logger:
+        logger.event("llm.describe_frames.parsed", parsed)
+    return parsed
 
 
 def describe_corpus_image(image_path, original_description: str, detail: str = "high"):
@@ -248,15 +264,30 @@ def _fmt_candidate(c: dict, with_id: bool = True) -> str:
     return f'{head}词：{c.get("words", "")}｜打法：{desc}'
 
 
-def rerank_text(query_json: dict, candidates: list[dict], top_text: int = 10) -> list[int]:
+def rerank_text(query_json: dict, candidates: list[dict], top_text: int = 10, logger=None) -> list[int]:
     """阶段4a：纯文本重排 → 返回排序后的候选 id 列表（≤top_text）。"""
+    top_text = max(1, int(top_text))
+    if not candidates:
+        if logger:
+            logger.event("llm.rerank_text.skipped", {"reason": "no candidates"})
+        return []
     valid_ids = {c["id"] for c in candidates}
     lines = "\n".join(_fmt_candidate(c) for c in candidates)
     user = (config.RERANK_TEXT_PROMPT % top_text
             + "\n\n【用户动作结构化描述】\n" + json.dumps(query_json, ensure_ascii=False)
             + "\n\n【候选词条】\n" + lines)
+    if logger:
+        logger.event("llm.rerank_text.request", {
+            "top_text": top_text,
+            "candidate_count": len(candidates),
+            "candidate_ids": [c.get("id") for c in candidates],
+            "query_json": query_json,
+            "prompt": user,
+        })
     try:
-        raw = chat([{"role": "user", "content": user}], max_tokens=400, json_mode=True, effort="low")
+        raw, usage = chat_with_usage([{"role": "user", "content": user}], max_tokens=400, json_mode=True, effort="low")
+        if logger:
+            logger.event("llm.rerank_text.response", {"raw": raw, "usage": usage})
         ranking = extract_json(raw).get("ranking", [])
         out, seen = [], set()
         for x in ranking:
@@ -268,15 +299,27 @@ def rerank_text(query_json: dict, candidates: list[dict], top_text: int = 10) ->
                 out.append(i)
                 seen.add(i)
         if out:
+            if logger:
+                logger.event("llm.rerank_text.parsed", {"ranking": out[:top_text]})
             return out[:top_text]
     except Exception as e:  # 解析/调用失败 → 退回召回原序
+        if logger:
+            logger.event("llm.rerank_text.fallback", {"error": f"{type(e).__name__}: {e}"})
         print(f"  [rerank_text 降级：{e}]")
-    return [c["id"] for c in candidates][:top_text]
+    fallback = [c["id"] for c in candidates][:top_text]
+    if logger:
+        logger.event("llm.rerank_text.fallback_result", {"ranking": fallback})
+    return fallback
 
 
 def _pick_frames(frame_paths, max_n: int):
     """帧过多时取首/中/尾 ≤max_n 张，省 token。"""
+    max_n = max(1, int(max_n))
     n = len(frame_paths)
+    if n == 0:
+        return []
+    if max_n == 1:
+        return [frame_paths[0]]
     if n <= max_n:
         return list(frame_paths)
     idxs = sorted({round(i * (n - 1) / (max_n - 1)) for i in range(max_n)})
@@ -284,13 +327,20 @@ def _pick_frames(frame_paths, max_n: int):
 
 
 def rerank_visual(frame_paths, candidates: list[dict], top_final: int = 5,
-                  batch_size: int = 10, max_query_frames: int = 4) -> list[dict]:
+                  batch_size: int = 10, max_query_frames: int = 4, logger=None) -> list[dict]:
     """阶段4b：原始帧 + 候选线描图 → top-K {id,confidence,reason}。"""
+    top_final = max(1, int(top_final))
+    batch_size = max(1, int(batch_size))
+    if not candidates:
+        if logger:
+            logger.event("llm.rerank_visual.skipped", {"reason": "no candidates"})
+        return []
     frames = _pick_frames(list(frame_paths), max_query_frames)
     by_id = {c["id"]: c for c in candidates}
     scored: dict[int, dict] = {}
     for start in range(0, len(candidates), batch_size):
         batch = candidates[start:start + batch_size]
+        batch_index = start // batch_size + 1
         content = [build_text_content(config.RERANK_VISUAL_PROMPT % top_final),
                    build_text_content("【用户关键帧】")]
         for p in frames:
@@ -299,9 +349,27 @@ def rerank_visual(frame_paths, candidates: list[dict], top_final: int = 5,
         for c in batch:
             content.append(build_text_content("候选 " + _fmt_candidate(c)))
             content.append(build_image_content(config.resolve_image(c["image_path"]), detail="low"))
+        if logger:
+            logger.event("llm.rerank_visual.batch_request", {
+                "batch_index": batch_index,
+                "top_final": top_final,
+                "batch_size": len(batch),
+                "frame_paths": [str(p) for p in frames],
+                "candidate_ids": [c.get("id") for c in batch],
+                "candidates": [_fmt_candidate(c) for c in batch],
+                "prompt": config.RERANK_VISUAL_PROMPT % top_final,
+            })
         try:
-            raw = chat([{"role": "user", "content": content}], max_tokens=800)
-            for r in extract_json(raw).get("results", []):
+            raw, usage = chat_with_usage([{"role": "user", "content": content}], max_tokens=800)
+            parsed = extract_json(raw)
+            if logger:
+                logger.event("llm.rerank_visual.batch_response", {
+                    "batch_index": batch_index,
+                    "raw": raw,
+                    "usage": usage,
+                    "parsed": parsed,
+                })
+            for r in parsed.get("results", []):
                 try:
                     rid = int(r.get("id"))
                 except (ValueError, TypeError):
@@ -312,9 +380,32 @@ def rerank_visual(frame_paths, candidates: list[dict], top_final: int = 5,
                 if rid not in scored or conf > scored[rid]["confidence"]:
                     scored[rid] = {"id": rid, "confidence": conf, "reason": str(r.get("reason", ""))}
         except Exception as e:
+            if logger:
+                logger.event("llm.rerank_visual.batch_fallback", {
+                    "batch_index": batch_index,
+                    "error": f"{type(e).__name__}: {e}",
+                })
             print(f"  [rerank_visual 批次降级：{e}]")
     if not scored:  # 全失败 → 退回前 top_final 候选；confidence 不可用，避免误显示为 0%
-        return [{"id": c["id"], "confidence": None, "reason": "（视觉重排暂不可用，按文本召回顺序展示）"}
-                for c in candidates[:top_final]]
+        fallback = [{"id": c["id"], "confidence": None, "reason": "（视觉重排暂不可用，按文本召回顺序展示）"}
+                    for c in candidates[:top_final]]
+        if logger:
+            logger.event("llm.rerank_visual.fallback_result", fallback)
+        return fallback
     ranked = sorted(scored.values(), key=lambda d: d["confidence"], reverse=True)
+    if len(ranked) < min(top_final, len(candidates)):
+        seen = {r["id"] for r in ranked}
+        for c in candidates:
+            if len(ranked) >= top_final:
+                break
+            if c["id"] in seen:
+                continue
+            ranked.append({
+                "id": c["id"],
+                "confidence": None,
+                "reason": "（部分视觉重排暂不可用，按文本召回顺序补齐）",
+            })
+            seen.add(c["id"])
+    if logger:
+        logger.event("llm.rerank_visual.final", ranked[:top_final])
     return ranked[:top_final]

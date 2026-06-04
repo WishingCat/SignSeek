@@ -16,6 +16,7 @@ TEST_DIR = PROJECT_ROOT / "测试题"
 
 INDEX_DIR = ROOT / "index"                             # 生成物
 REPORTS_DIR = ROOT / "reports"                          # 生成物
+QUERY_LOGS_DIR = ROOT / "query_logs"                    # 查询明细日志（含输入帧副本）
 EMB_PATH = INDEX_DIR / "embeddings.npy"
 META_PATH = INDEX_DIR / "meta.json"
 INDEX_META_PATH = INDEX_DIR / "index_meta.json"
@@ -31,7 +32,13 @@ EMB_MODEL = "BAAI/bge-small-zh-v1.5"                    # 本地中文向量，5
 
 def resolve_image(image_path: str) -> Path:
     """词条 image_path（形如 images/v1_xxx.jpg）→ 绝对路径。"""
-    return DB_DIR / image_path
+    primary = DB_DIR / image_path
+    if primary.exists():
+        return primary
+    v2_path = PROJECT_ROOT / "sign-language-database-v2" / image_path
+    if v2_path.exists():
+        return v2_path
+    return primary
 
 
 # --- 查询结构化描述的 JSON schema（GPT-5.5 理解阶段输出）---------------
@@ -57,6 +64,10 @@ QUERY_JSON_SCHEMA = {
 }
 
 _UNCERTAIN_TOKENS = {"", "uncertain", "未知", "不确定", "无法确定", "看不到", "不可见", "none", "n/a", "na"}
+_EXPRESSION_QUERY_TOKENS = {
+    "嘴", "唇", "口", "舌", "牙", "腮", "颊", "脸", "嘟", "鼓",
+    "笑", "哭", "怒", "严肃", "坚毅", "鄙夷",
+}
 
 
 def render_query_text(desc: dict) -> str:
@@ -77,6 +88,9 @@ def render_query_text(desc: dict) -> str:
         if keep(v):
             parts.append(v.strip())
     text = "，".join(parts)
+    expr = desc.get("expression", "")
+    if keep(expr) and any(token in expr for token in _EXPRESSION_QUERY_TOKENS):
+        text = f"{text}。{expr.strip()}" if text else expr.strip()
     icon = desc.get("iconicity", "")
     if keep(icon):
         text = f"{text}。{icon.strip()}" if text else icon.strip()
@@ -103,7 +117,7 @@ RERANK_TEXT_PROMPT = """以下是用户某个手语动作的结构化描述（�
 
 只输出 JSON：{"ranking": [候选id, ...]}，最多 %d 个，按可能性降序。"""
 
-RERANK_VISUAL_PROMPT = """第一组图是用户做手语动作的关键帧照片（真人单手实拍）。随后每个候选是词典里的一个词条：黑白线描示意图（含人物半身、虚线表示运动方向）+ 中文词 + 打法描述。
+RERANK_VISUAL_PROMPT = """第一组图是用户做手语动作的关键帧照片（真人实拍，可能单手或双手）。随后每个候选是词典里的一个词条：黑白线描示意图（含人物半身、虚线表示运动方向）+ 中文词 + 打法描述。
 
 请对照判断用户动作最可能对应哪些词条，挑出最匹配的最多 %d 条，按可能性排序。
 
