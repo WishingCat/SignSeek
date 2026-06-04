@@ -175,7 +175,7 @@ def run_query(frame_paths, *, top_recall=40, top_text=10, top_final=5,
 
         # 形近字增召回：王/十/口/工 这类"比字形"词条靠语义描述，向量召回会漏，按字符补进重排池
         res = (desc.get("resembles") or "").strip()
-        if res and len(res) <= 4:
+        if res and len(res) <= 4 and config.should_use_resembles_anchor(desc):
             boosted = []
             for j, m in enumerate(meta):
                 if m["id"] in by_id:
@@ -201,7 +201,10 @@ def run_query(frame_paths, *, top_recall=40, top_text=10, top_final=5,
             if boosted:
                 print(f"· 词法增召回：“{res}” 命中 {len(boosted)} 条，注入 {min(len(boosted), 6)} 条")
         elif logger:
-            logger.event("lexical_boost.skipped", {"resembles": res})
+            logger.event("lexical_boost.skipped", {
+                "resembles": res,
+                "reason": "empty_or_filtered",
+            })
 
         # (4a) 文本重排 → 选出 top_text 候选（含召回兜底补齐）
         print("· 文本重排…")

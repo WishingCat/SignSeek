@@ -70,6 +70,23 @@ _EXPRESSION_QUERY_TOKENS = {
 }
 
 
+def should_use_resembles_anchor(desc: dict) -> bool:
+    """Whether resembles should become a lexical recall anchor.
+
+    Single-hand O/OK shapes are often just handshape, not an intended finger
+    letter.  Treat them as lexical anchors only when the model explicitly says
+    it is a finger-letter/letter gesture.
+    """
+    res = str(desc.get("resembles") or "").strip()
+    if not res:
+        return False
+    hands = str(desc.get("hands") or "")
+    iconicity = str(desc.get("iconicity") or "")
+    if len(res) == 1 and res.upper() in {"O"} and hands in {"一只手", "单手"}:
+        return "手指字母" in iconicity or "字母" in iconicity
+    return True
+
+
 def render_query_text(desc: dict) -> str:
     """把结构化描述渲染成一句"贴库措辞"的描述，用于 embedding 召回。
 
@@ -95,7 +112,7 @@ def render_query_text(desc: dict) -> str:
     if keep(icon):
         text = f"{text}。{icon.strip()}" if text else icon.strip()
     res = desc.get("resembles", "")
-    if keep(res):
+    if keep(res) and should_use_resembles_anchor(desc):
         text = f"{text}，双手比划“{res.strip()}”字形" if text else f"双手比划“{res.strip()}”字形"
     return text or "（描述不足）"
 
